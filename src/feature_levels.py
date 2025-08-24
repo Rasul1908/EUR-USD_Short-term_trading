@@ -38,16 +38,25 @@ def _vwap_24h_up_to(df: pd.DataFrame, cutoff_utc: pd.Timestamp) -> float | np.na
     return float((tp * win["Volume"]).sum() / win["Volume"].sum())
 
 
-def compute_levels(df: pd.DataFrame,
-                   *,
-                   ts_col: str = "Gmt time",
-                   vwap_mode: str = "rolling_24h",
-                   vwap_alpha: float = 0.25,
-                   l1_use: bool = True,
-                   ib_k: float = 1.0,
-                   vol_score_col: str = "vol_score",
-                   vol_scale_l1: bool = True,
-                   vol_scale_fv: bool = False) -> pd.DataFrame:
+def compute_levels(
+    df,
+    *,
+    ts_col: str = "Gmt time",
+    fv_window_minutes: int = 30,
+    vwap_mode: str = "rolling_24h",
+    vwap_alpha: float = 0.25,
+    l1_use: bool = True,
+    l1_mode: str = "ib_multiple",
+    ib_k: float = 1.0,
+    vol_score_col: str = "vol_score",
+    vol_scale_l1: bool = True,
+    vol_scale_fv: bool = False,
+    # --- NEW ---
+    scale_mode: str = "up_only",     # "up_only" | "both" | "none"
+    cap_gap_lo: float | None = None,
+    cap_gap_hi: float | None = None,
+) -> pd.DataFrame:
+
     """
     Compute FV and L1 levels, carry prev day until warmup end.
     """
@@ -81,11 +90,26 @@ def compute_levels(df: pd.DataFrame,
         fv_low_adj, fv_high_adj = fv_mid_adj-half_range_adj, fv_mid_adj+half_range_adj
         fv_half_dn, fv_half_up = 0.5*(fv_mid_adj+fv_low_adj), 0.5*(fv_mid_adj+fv_high_adj)
 
-        gap = (fv_high-fv_low)*ib_k
-        if l1_use and vol_scale_l1 and vol_score_col in g.columns:
-            vscore = g[vol_score_col].iloc[0]
-            if pd.notna(vscore):
-                gap *= float(vscore)
+                # Base distance from FV → L1
+        gap = (fv_high - fv_low) * ib_k
+
+        # Volatility scaling for L1 gap
+        if l1_use and vol_scale_l1 and (vol_score_col in g.columns):
+            vs = g[vol_score_col].iloc[0]
+            if pd.notna(vs):
+                if scale_mode == "up_only":
+                    gap *= max(1.0, float(vs))   # expand on high vol, never shrink
+                elif scale_mode == "both":
+                    gap *= float(vs)             # expand or shrink
+                elif scale_mode == "none":
+                    pass
+
+        # Optional hard caps if you still use them
+        if cap_gap_lo is not None:
+            gap = max(gap, cap_gap_lo)
+        if cap_gap_hi is not None:
+            gap = min(gap, cap_gap_hi)
+
 
         if l1_use:
             l1_up = fv_high_adj+gap; l1_dn=fv_low_adj-gap
